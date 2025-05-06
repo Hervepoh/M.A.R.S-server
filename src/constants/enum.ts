@@ -1,0 +1,35 @@
+export enum EventType {
+    LOGIN = 'LOGIN',
+    LOGOUT = 'LOGOUT',
+    TRANSACTION = 'TRANSACTION',
+    JOB = 'JOB'
+}
+
+export enum NotificationType {
+    EMAIL = "EMAIL",
+    WHATSAPP = "WHATSAPP",
+}
+
+export enum serviceType {
+    MMS = "MMS",
+    SUMMARY = "SUMMARY",
+    ASSIGNMENT = "ASSIGNMENT",
+    TRANSACTION = "TRANSACTION",
+    TRANSACTIONDETAIL = "TRANSACTIONDETAIL",
+    PAYMENTMODE = "PAYMENTMODE",
+    BANK = "BANK",
+    BANKAGENCY = "BANKAGENCY",
+    SEGMENT = "SEGMENT",
+    UNIT = "UNIT",
+    REGION = "REGION",
+    ICN = "ICN",
+    UNPAID = "UNPAID",
+    USER = "USER",
+    ROLE = "ROLE",
+    PERMISSION = "PERMISSION",
+    NOTIFICATION = "NOTIFICATION",
+    CUSTOMERSREFERENCES = "CUSTOMERS-REFERENCES",
+    WORKFLOW = "WORKFLOW",
+    JOB = "JOB",
+}
+

@@ -1,0 +1,1302 @@
+// =============================================
+// PRISMA SCHEMA DEFINITION
+// =============================================
+// This schema implements a complete ticketing system with:
+// - User management and RBAC (Role-Based Access Control)
+// - Workflow automation with state transitions
+// - Full audit logging and change tracking
+// - Soft delete functionality
+// - Integration with external systems
+// - Multi-Factor Authentication (MFA)
+// - Notification system
+// - Job scheduling and locking
+// - Data import and export capabilities
+// - Views for reporting and analytics
+// - Support for multiple languages and locales
+// - Support for multiple authentication methods (LDAP, OAuth, JWT)
+
+// =============================================
+// 1. GENERATOR & DATA SOURCE CONFIGURATION
+// =============================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["views"]
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================
+// 3. CORE MODELS & CONCEPTS
+// =============================================
+model People {
+  id        String   @id @default(uuid()) @db.Char(36)
+  name      String
+  email     String   @unique
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("people")
+}
+
+// =============================================
+// 3. AUTHENTIFICATION & AUTHORIZATION MODELS
+// =============================================
+
+// User model - represents system users
+model User {
+  id                String    @id @default(uuid()) @db.Char(36)
+  name              String
+  phone             String?
+  email             String    @unique
+  password          String
+  passwordExpiredAt DateTime?
+
+  // Account status fields
+  ldap                Boolean   @default(false)
+  isActive            Boolean   @default(true)
+  isInActiveAt        DateTime?
+  failedLoginAttempts Int       @default(0)
+  lastFailedLoginAt   DateTime?
+  // Organizational relationships
+  unitId              String?   @db.Char(36)
+  unit                Unit?     @relation(fields: [unitId], references: [id])
+
+  segmentId String?   @db.Char(36)
+  // Timestamps 
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  // Soft delete tracking
+  deleted   Boolean   @default(false)
+  deletedAt DateTime?
+
+  createdAssignments        Assignment[]                     @relation("AssignmentCreatedBy")
+  updatedAssignments        Assignment[]                     @relation("AssignmentModifiedBy")
+  assignments               Assignment[]                     @relation("AssignmentOwner")
+  validatedAssignments      Assignment[]                     @relation("AssignmentValidator")
+  Audit                     Audit[]
+  transactionDetails        TransactionDetail[]
+  assignedTransactions      Transaction[]                    @relation("TransactionAssignator")
+  createdTransactions       Transaction[]                    @relation("TransactionCreatedBy")
+  modifiedTransactions      Transaction[]                    @relation("TransactionModifiedBy")
+  transactions              Transaction[]                    @relation("TransactionOwner")
+  validatedTransactions     Transaction[]                    @relation("TransactionValidator")
+  verifiedTransactions      Transaction[]                    @relation("TransactionVerifier")
+  temporaryUserTransactions TransactionTempUser[]
+  roles                     UserRole[]
+  segment                   Segment?                         @relation(fields: [segmentId], references: [id])
+  userPasswordHistory       UserPasswordHistory[]
+  userMFA                   UserMFA[]
+  TicketHistory             TicketHistory[]
+  TicketValidations         TicketWorkflowValidationAction[]
+  ValidationUser            WorkflowValidationUser[]
+  Job                       Job[]
+
+  @@index([segmentId], map: "users_segmentId_fkey")
+  @@index([unitId], map: "users_unitId_fkey")
+  @@map("users")
+}
+
+// Password history model - tracks user password changes
+model UserPasswordHistory {
+  id        String   @id @default(uuid())
+  userId    String   @db.Char(36)
+  password  String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId], name: "idx_password_history_userId")
+  @@map("user_password_histories")
+}
+
+// MFA model - represents multi-factor authentication methods
+model UserMFA {
+  id        String    @id @default(uuid())
+  userId    String    @db.Char(36)
+  method    MFAMethod
+  secret    String
+  isEnabled Boolean   @default(false)
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, method], name: "uq_user_mfas_userId_method")
+  @@index([userId], map: "idx_user_mfas_userId")
+  @@index([method], map: "idx_user_mfas_method")
+  @@map("user_mfas")
+}
+
+// =============================================
+// 3. RBAC (ROLE-BASED ACCESS CONTROL)
+// =============================================
+
+model Role {
+  id             String                   @id @default(uuid()) @db.Char(36)
+  name           String                   @unique
+  description    String?
+  createdAt      DateTime                 @default(now()) @map("created_at")
+  updatedAt      DateTime                 @updatedAt @map("updated_at")
+  RolePermission RolePermission[]
+  UserRole       UserRole[]
+  ValidationRole WorkflowValidationRole[]
+
+  @@map("roles")
+}
+
+model UserRole {
+  userId    String
+  roleId    String
+  isDefault Boolean @default(false)
+  role      Role    @relation(fields: [roleId], references: [id])
+  user      User    @relation(fields: [userId], references: [id])
+
+  @@id([userId, roleId])
+  @@index([userId], map: "user_roles_userId_fkey")
+  @@index([roleId], map: "user_roles_roleId_fkey")
+  @@map("user_roles")
+}
+
+model Permission {
+  id          String   @id @default(uuid()) @db.Char(36)
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  RolePermission RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id])
+  role         Role       @relation(fields: [roleId], references: [id])
+
+  @@id([roleId, permissionId])
+  @@index([permissionId], map: "role_permissions_permissionId_fkey")
+  @@index([roleId], map: "role_permissions_roleId_fkey")
+  @@map("role_permissions")
+}
+
+// =============================================
+// 4. WORKFLOW STATE MANAGEMENT
+// =============================================
+model Workflow {
+  id          String  @id @default(uuid())
+  name        String
+  description String?
+  isActive    Boolean @default(true)
+  isDefault   Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  createdBy String   @db.Char(36)
+  updatedAt DateTime @default(now()) @updatedAt
+  updatedBy String   @db.Char(36)
+
+  deleted   Boolean   @default(false)
+  deletedAt DateTime?
+  deletedBy String?   @db.Char(36)
+
+  // relationships
+  Steps           WorkflowStep[]   @relation("WorkflowSteps")
+  TicketWorkflows TicketWorkflow[]
+
+  @@index([name], name: "idx_workflows_name")
+  @@map("workflows")
+}
+
+model WorkflowStep {
+  id          String   @id @default(uuid())
+  workflow    Workflow @relation("WorkflowSteps", fields: [workflowId], references: [id])
+  workflowId  String
+  name        String
+  description String?
+  order       Int
+
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  outgoingTransitions WorkflowTransition[] @relation("FromStepTransitions")
+  incomingTransitions WorkflowTransition[] @relation("ToStepTransitions")
+
+  Tickets           TicketWorkflow[]
+  TicketHistorys    TicketHistory[]
+  TicketValidations TicketWorkflowValidationAction[]
+  Validations       WorkflowValidation[]             @relation("StepValidations")
+
+  @@unique([workflowId, order], name: "uq_workflow_steps_workflowId_order")
+  @@index([name], name: "idx_workflow_steps_name")
+  @@map("workflow_steps")
+}
+
+model WorkflowTransition {
+  id             String         @id @default(uuid())
+  fromStep       WorkflowStep   @relation("FromStepTransitions", fields: [fromStepId], references: [id])
+  fromStepId     String
+  toStep         WorkflowStep   @relation("ToStepTransitions", fields: [toStepId], references: [id])
+  toStepId       String
+  conditionType  ConditionType? //@default(EXPRESSION) // EXPRESSION/JSON_SCHEMA
+  conditionValue String? // Expression ou JSON
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+}
+
+model WorkflowValidation {
+  id     String         @id @default(uuid())
+  type   ValidationType
+  step   WorkflowStep   @relation("StepValidations", fields: [stepId], references: [id])
+  stepId String
+
+  ValidationRoles WorkflowValidationRole[]
+  ValidationUsers WorkflowValidationUser[]
+
+  timeoutHours  Int? // Délai avant escalation
+  timeoutStepId String? // Étape si timeout
+
+  requiredApprovals Int            @default(1) // Nombre d'approbations nécessaires
+  approvalPolicy    ApprovalPolicy @default(ANY) // ANY = une seule suffit, ALL = toutes requises
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  @@map("workflow_validations")
+}
+
+// Table de jointure pour WorkflowValidation <=> Role
+model WorkflowValidationRole {
+  workflowValidationId String             @db.Char(36)
+  roleId               String             @db.Char(36)
+  workflowValidation   WorkflowValidation @relation(fields: [workflowValidationId], references: [id])
+  role                 Role               @relation(fields: [roleId], references: [id])
+
+  @@id([workflowValidationId, roleId])
+  @@map("workflow_validation_roles")
+}
+
+// Table de jointure pour WorkflowValidation <=> User
+model WorkflowValidationUser {
+  workflowValidationId String             @db.Char(36)
+  userId               String             @db.Char(36)
+  workflowValidation   WorkflowValidation @relation(fields: [workflowValidationId], references: [id])
+  user                 User               @relation(fields: [userId], references: [id])
+
+  @@id([workflowValidationId, userId])
+  @@map("workflow_validation_users")
+}
+
+// =============================================
+// 5. TICKETING SYSTEM
+// =============================================
+// Ticket - core work item model
+model Ticket {
+  id           String       @id @default(uuid())
+  reference    String
+  type         String
+  unpaidCount  Int?         @default(0)
+  unpaidAmount Float?       @default(0)
+  comment      String?
+  status       TicketStatus @default(NEW)
+
+  // Timestamps and user action tracting
+  createdBy String   @db.Char(36)
+  createdAt DateTime @default(now())
+
+  updatedBy String?  @db.Char(36)
+  updatedAt DateTime @updatedAt
+
+  // Soft delete tracking
+  deleted   Boolean   @default(false)
+  deletedAt DateTime?
+  deletedBy String?   @db.Char(36)
+
+  // relationships
+  History           TicketHistory[]                  @relation("TicketHistories")
+  TicketWorkflow    TicketWorkflow[]
+  TicketValidations TicketWorkflowValidationAction[]
+  Jobs              Job[]
+
+  // Indexes for query performance
+  @@index([type], name: "idx_ticket_type")
+  @@index([status], name: "idx_ticket_status")
+  @@index([reference], name: "idx_ticket_reference")
+  @@map("tickets")
+}
+
+model TicketWorkflow {
+  ticketId              String
+  workflowId            String
+  workflowcurrentStepId String
+
+  // relationships
+  workflow            Workflow      @relation(fields: [workflowId], references: [id])
+  ticket              Ticket        @relation(fields: [ticketId], references: [id])
+  workflowCurrentStep WorkflowStep? @relation(fields: [workflowcurrentStepId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@id([ticketId, workflowId])
+  @@index([ticketId], map: "user_roles_userId_fkey")
+  @@index([workflowId], map: "user_roles_roleId_fkey")
+  @@map("ticket_workflow")
+}
+
+model TicketWorkflowValidationAction {
+  id             String               @id @default(uuid())
+  ticketId       String               @db.Char(36)
+  workflowStepId String               @db.Char(36)
+  userId         String               @db.Char(36)
+  validatedAt    DateTime             @default(now())
+  status         ValidationActionType // "APPROVED" ou "REJECTED"
+  comment        String?
+
+  Ticket       Ticket       @relation(fields: [ticketId], references: [id])
+  WorkflowStep WorkflowStep @relation(fields: [workflowStepId], references: [id])
+  User         User         @relation(fields: [userId], references: [id])
+
+  @@index([ticketId])
+  @@index([workflowStepId])
+  @@map("ticket_workflow_validation_actions")
+}
+
+model TicketHistory {
+  id             String        @id @default(uuid())
+  ticketId       String
+  // fromStep       WorkflowStep? @relation("FromStepHistories", fields: [fromStepId], references: [id])
+  fromStepId     String?
+  // toStep         WorkflowStep  @relation("ToStepHistories", fields: [toStepId], references: [id])
+  toStepId       String
+  // actionBy       User          @relation(fields: [actionById], references: [id])
+  actionById     String
+  actionAt       DateTime      @default(now())
+  comment        String?
+  WorkflowStep   WorkflowStep? @relation(fields: [workflowStepId], references: [id])
+  workflowStepId String?
+  User           User?         @relation(fields: [userId], references: [id])
+  userId         String?       @db.Char(36)
+
+  ticket Ticket @relation("TicketHistories", fields: [ticketId], references: [id])
+
+  @@index([ticketId], name: "idx_ticket_histories_ticketId")
+  @@index([actionAt], name: "idx_ticket_histories_actionAt")
+  @@index([fromStepId, toStepId], name: "idx_ticket_histories_step_transition")
+  @@map("ticket_histories")
+}
+
+// =============================================
+// 5. AUDIT MANAGEMENT
+// =============================================
+model Audit {
+  id        Int        @id @default(autoincrement())
+  userId    String?    @db.Char(36)
+  ipAddress String?
+  action    EventType
+  details   String     @db.VarChar(5000)
+  endpoint  String
+  createdAt DateTime   @default(now())
+  source    SourceType
+  user      User?      @relation(fields: [userId], references: [id])
+
+  @@index([userId], map: "audits_userId_fkey")
+  @@map("audits")
+}
+
+// =============================================
+// 4. NOTIFICATION MANAGEMENT
+// =============================================
+model Notification {
+  id        Int                @id @default(autoincrement())
+  userId    String?
+  email     String?
+  phone     String?
+  method    NotificationMethod
+  subject   String
+  message   String             @db.VarChar(5000)
+  template  String?
+  status    String             @default("unread")
+  sent      Boolean            @default(false)
+  sentAt    DateTime?
+  createdAt DateTime           @default(now()) @map("created_at")
+  updatedAt DateTime           @updatedAt @map("updated_at")
+
+  @@map("notifications")
+}
+
+// =============================================
+// 2. CORE MODELS
+// =============================================
+
+model Bank {
+  id           String        @id @default(uuid()) @db.Char(36)
+  name         String        @db.VarChar(255)
+  code         String?
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  BankAgency   BankAgency[]
+  Transactions Transaction[]
+
+  @@map("banks")
+}
+
+model BankAgency {
+  id             String        @id @default(uuid()) @db.Char(36)
+  name           String        @unique
+  code           String?
+  town           String?
+  account_number String?
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  bankId         String        @db.Char(36)
+  bank           Bank          @relation(fields: [bankId], references: [id])
+  Transactions   Transaction[]
+
+  @@index([bankId], map: "bank_agencies_bankId_fkey")
+  @@map("bank_agencies")
+}
+
+model PaymentMode {
+  id           String        @id @default(uuid()) @db.Char(36)
+  name         String        @db.VarChar(255)
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  Transactions Transaction[]
+
+  @@map("payment_modes")
+}
+
+model Status {
+  id           Int           @id @default(autoincrement())
+  name         String        @db.VarChar(255)
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  Transactions Transaction[]
+
+  @@map("status")
+}
+
+model Reference {
+  id        String   @id @default(uuid()) @db.Char(36)
+  reference String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("references")
+}
+
+model JobLock {
+  job_name   String   @id
+  is_running Boolean  @default(false)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@map("job_locks")
+}
+
+model Job {
+  id          Int       @id @default(autoincrement())
+  ticketId    String?
+  ticket      Ticket?   @relation(fields: [ticketId], references: [id])
+  app         String // ex: "mms"
+  userId      String?
+  user        User?     @relation(fields: [userId], references: [id])
+  device      String
+  action      JobAction // "disconnect" ou "reconnect"
+  jobId       String? // Peut être null si erreur
+  error       String? // Description de l'erreur éventuelle
+  status      JobStatus @default(PENDING) // "success" ou "failed"
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(5)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([ticketId])
+  @@index([app, status])
+  @@map("jobs")
+}
+
+model Transaction {
+  id                        String                @id @default(uuid()) @db.Char(36)
+  reference                 String?               @unique
+  name                      String
+  amount                    Float
+  bankId                    String                @db.Char(36)
+  paymentDate               DateTime
+  paymentModeId             String                @db.Char(36)
+  description               String?               @db.VarChar(255)
+  statusId                  Int                   @default(1)
+  validatorId               String?               @db.Char(36)
+  validatedAt               DateTime?
+  assignBy                  String?               @db.Char(36)
+  assignAt                  DateTime?
+  refusal                   Boolean               @default(false)
+  reasonForRefusal          String?
+  userId                    String?               @db.Char(36)
+  segmentId                 String?               @db.Char(36)
+  unitId                    String?               @db.Char(36)
+  regionId                  String?               @db.Char(36)
+  createdBy                 String?
+  modifiedBy                String?
+  deleted                   Boolean               @default(false)
+  deletedBy                 String?
+  deletedAt                 DateTime?
+  createdAt                 DateTime              @default(now()) @map("created_at")
+  updatedAt                 DateTime              @updatedAt @map("updated_at")
+  adviceDuplication         Boolean               @default(false) @map("advice_duplication")
+  branchId                  String                @db.Char(36)
+  isReceiptReady            Boolean               @default(false)
+  verifierAt                DateTime?
+  verifierBy                String?               @db.Char(36)
+  transactionDetails        TransactionDetail[]
+  assignator                User?                 @relation("TransactionAssignator", fields: [assignBy], references: [id])
+  bank                      Bank                  @relation(fields: [bankId], references: [id])
+  branch                    BankAgency            @relation(fields: [branchId], references: [id])
+  creator                   User?                 @relation("TransactionCreatedBy", fields: [createdBy], references: [id])
+  modifier                  User?                 @relation("TransactionModifiedBy", fields: [modifiedBy], references: [id])
+  paymentMode               PaymentMode           @relation(fields: [paymentModeId], references: [id])
+  region                    Region?               @relation(fields: [regionId], references: [id])
+  status                    Status                @relation(fields: [statusId], references: [id])
+  unit                      Unit?                 @relation(fields: [unitId], references: [id])
+  user                      User?                 @relation("TransactionOwner", fields: [userId], references: [id])
+  validator                 User?                 @relation("TransactionValidator", fields: [validatorId], references: [id])
+  verifier                  User?                 @relation("TransactionVerifier", fields: [verifierBy], references: [id])
+  userTemporaryTransactions TransactionTempUser[]
+
+  @@index([assignBy], map: "transactions_assignBy_fkey")
+  @@index([bankId], map: "transactions_bankId_fkey")
+  @@index([createdBy], map: "transactions_createdBy_fkey")
+  @@index([modifiedBy], map: "transactions_modifiedBy_fkey")
+  @@index([verifierBy], map: "transactions_verifierBy_fkey")
+  @@index([paymentModeId], map: "transactions_paymentModeId_fkey")
+  @@index([regionId], map: "transactions_regionId_fkey")
+  @@index([segmentId], map: "transactions_segmentId_fkey")
+  @@index([statusId], map: "transactions_statusId_fkey")
+  @@index([unitId], map: "transactions_unitId_fkey")
+  @@index([userId], map: "transactions_userId_fkey")
+  @@index([validatorId], map: "transactions_validatorId_fkey")
+  @@index([branchId], map: "transactions_branchId_fkey")
+  @@map("transactions")
+}
+
+model TransactionDetail {
+  id            String      @id @default(uuid())
+  transactionId String
+  contract      String
+  invoice       String
+  name          String
+  amountUnpaid  Float
+  amountTopaid  Float
+  selected      Boolean     @default(true)
+  deleted       Boolean     @default(false)
+  deletedAt     DateTime?
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+  date          String
+  userId        String      @db.Char(36)
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+  user          User        @relation(fields: [userId], references: [id])
+
+  @@index([transactionId], map: "transaction_details_transactionId_fkey")
+  @@index([userId], map: "transaction_details_userId_fkey")
+  @@map("transaction_details")
+}
+
+model TransactionTempUser {
+  transactionId String
+  userId        String
+  transactions  Transaction @relation(fields: [transactionId], references: [id])
+  users         User        @relation(fields: [userId], references: [id])
+
+  @@id([transactionId, userId])
+  @@index([userId], map: "transactions_temp_users_userId_fkey")
+  @@map("transactions_temp_users")
+}
+
+model TransactionHistory {
+  id            Int      @id @default(autoincrement())
+  transactionId String
+  userId        String
+  verifierId    String
+  action        String
+  reason        String
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("transactions_verification_history")
+}
+
+model IntegrationDocument {
+  id                        Int                  @id @default(autoincrement())
+  reference                 String
+  transactionId             String
+  transactionDetailsId      String
+  transaction_id            String
+  sub_transaction_type      String
+  bill_partner_company_name String
+  bill_partner_company_code String
+  bill_number               String
+  bill_account_number       String
+  bill_due_date             String
+  paid_amount               String
+  paid_date                 String
+  paid_by_msisdn            String
+  transaction_status        String
+  om_bill_payment_status    String
+  integration_status        EventIntegrationType
+  createdAt                 DateTime             @default(now()) @map("created_at")
+  updatedAt                 DateTime             @updatedAt @map("updated_at")
+
+  @@map("integration_documents")
+}
+
+model IntegrationDocumentHistory {
+  id                  Int                  @id @default(autoincrement())
+  IntegrationDocument Int
+  reference           String
+  integration_status  EventIntegrationType
+  createdAt           DateTime             @default(now()) @map("created_at")
+
+  @@map("integration_documents_history")
+}
+
+model CustomerReference {
+  id          String    @id @default(uuid()) @db.Char(36)
+  region      String    @db.Char(50)
+  agency      String    @db.Char(50)
+  service_no  String
+  client_code String
+  status      String
+  client      String
+  category    String
+  supply_ref  String
+  meter_no    String
+  contact     String?
+  userId      String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  createdBy   String?
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  updatedBy   String?
+  deleted     Boolean   @default(false)
+  deletedAt   DateTime?
+  deletedBy   String?
+
+  @@map("customers_reference")
+}
+
+model Segment {
+  id        String   @id @default(uuid()) @db.Char(36)
+  name      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  User      User[]
+
+  @@map("segments")
+}
+
+model Unit {
+  id           String        @id @default(uuid()) @db.Char(36)
+  name         String        @unique
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  regionId     String        @db.Char(36)
+  Assignment   Assignment[]
+  transactions Transaction[]
+  region       Region        @relation(fields: [regionId], references: [id])
+  users        User[]
+
+  @@index([regionId], map: "units_regionId_fkey")
+  @@map("units")
+}
+
+model Region {
+  id           String        @id @default(uuid()) @db.Char(36)
+  name         String        @unique
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  transactions Transaction[]
+  units        Unit[]
+
+  @@map("regions")
+}
+
+model Assignment {
+  id               String               @id @default(uuid()) @db.Char(36)
+  status           AssignmentStatusType
+  reference        String
+  unitId           String               @db.Char(36)
+  userId           String               @db.Char(36)
+  validatorId      String?              @db.Char(36)
+  validatedAt      DateTime?
+  reasonForRefusal String?
+  createdAt        DateTime             @default(now()) @map("created_at")
+  createdBy        String               @db.Char(36)
+  updatedAt        DateTime             @updatedAt @map("updated_at")
+  modifiedBy       String               @db.Char(36)
+  deleted          Boolean              @default(false)
+  deletedBy        String?
+  deletedAt        DateTime?            @map("deleted_at")
+  creator          User                 @relation("AssignmentCreatedBy", fields: [createdBy], references: [id])
+  modifier         User                 @relation("AssignmentModifiedBy", fields: [modifiedBy], references: [id])
+  unit             Unit                 @relation(fields: [unitId], references: [id])
+  user             User                 @relation("AssignmentOwner", fields: [userId], references: [id])
+  validator        User?                @relation("AssignmentValidator", fields: [validatorId], references: [id])
+
+  @@index([createdBy], map: "assignments_createdBy_fkey")
+  @@index([modifiedBy], map: "assignments_modifiedBy_fkey")
+  @@index([unitId], map: "assignments_unitId_fkey")
+  @@index([userId], map: "assignments_userId_fkey")
+  @@index([validatorId], map: "assignments_validatorId_fkey")
+  @@map("assignments")
+}
+
+model AssignmentHistory {
+  id          String              @id @default(uuid()) @db.Char(36)
+  status      EventAssignmentType
+  reference   String
+  OldAssignTo String?
+  OldUnit     String?
+  OldRegion   String?
+  NewAssignTo String?
+  NewUnit     String?
+  NewRegion   String?
+  createdAt   DateTime            @default(now()) @map("created_at")
+  createdBy   String              @db.Char(36)
+
+  @@map("assignments_history")
+}
+
+model t_mms_meter_reading {
+  id           String  @id @default(uuid()) @db.Char(36)
+  METER_NUMBER String
+  DATE_B       String?
+  HEURE_B      String?
+  ACTIF_IM_B   String?
+  ACTIF_EX_B   String?
+  REACTIF_IM_B String?
+  P_MAX_B      String?
+  ALARM        String?
+  DATE_I       String?
+  HEURE_I      String?
+  ACTIF_IM_I   String?
+  ACTIF_EX_I   String?
+  REACTIF_IM_I String?
+  P_MAX_I      String?
+  CHECK_METER  String?
+  RELAY_STATUS String?
+  READING_DATE String?
+}
+
+model t_import_clients_cms {
+  SERVICE_NUMBER         Int     @id
+  SUPPLY_POINT           Int?
+  CODE_CLIENT            Int?
+  NOM_CLIENT             String? @db.VarChar(110)
+  NO_COMPTEUR            String? @db.VarChar(35)
+  ADRESSE_CLIENT         String? @db.VarChar(85)
+  CONTACT_CLIENT         String? @db.VarChar(65)
+  CODE_TARIF_CLIENT      String? @db.VarChar(4)
+  LIBELLE_TARIF_CLIENT   String? @db.VarChar(30)
+  CODE_STATUT_CONTRAT    String? @db.VarChar(5)
+  LIBELLE_STATUT_CONTRAT String? @db.Text
+  CODE_TYPE_PHASE        String? @db.VarChar(5)
+  LIBELLE_TYPE_PHASE     String? @db.VarChar(9)
+  VOLTAGE_CLIENT         String? @db.VarChar(2)
+  CODE_REGROUPEMENT      String? @db.VarChar(35)
+  NOM_REGROUPEMENT       String? @db.VarChar(110)
+  CENTRE_DE_REVE         Int?
+  TYPE_COMPTEUR          String? @db.VarChar(17)
+  TYPE_CLIENT            String? @db.VarChar(8)
+  CATEGORIE_CLIENT       String? @db.VarChar(9)
+  REGION                 String? @db.VarChar(15)
+  DIVISION               String? @db.VarChar(25)
+  CODE_AGENCE            Int?
+  AGENCE                 String? @db.VarChar(35)
+
+  @@index([SERVICE_NUMBER], map: "idx_t_import_clients_cms_lookup")
+}
+
+model t_import_factures_cms {
+  NUMERO_FACTURE               Int     @id
+  SERVICE_NUMBER               Int?
+  MONTANT_HT                   Float?
+  MONTANT_TAXE                 Float?
+  MONTANT_TTC                  Float?
+  MONTANT_IMPAYE_TTC           Float?
+  CODE_STATUT_FACTURE          String? @db.VarChar(5)
+  LIBELLE_STATUT_FACTURE       String? @db.Text
+  CODE_TYPE_FACTURE            String? @db.VarChar(5)
+  LIBELLE_TYPE_FACTURE         String? @db.Text
+  DATE_MAJ_STATUT_FACTURE      String? @db.VarChar(19)
+  DATE_FACTURATION             String? @db.VarChar(19)
+  DATE_DISPO_FACTURE           String? @db.VarChar(19)
+  DATE_LIMITE_PAIEMENT_FACTURE String? @db.VarChar(19)
+
+  @@index([NUMERO_FACTURE], map: "idx_t_import_factures_cms_lookup")
+}
+
+view v_users {
+  id        String    @id @default(uuid()) @db.Char(36)
+  name      String
+  email     String
+  phone     String?
+  ldap      Boolean
+  isActive  Boolean
+  status    String
+  deleted   Boolean
+  deletedAt DateTime?
+  roles     String?
+  unit      String?
+  createdAt DateTime
+  updatedAt DateTime
+
+  @@map("v_users")
+}
+
+view v_users_id {
+  id       String  @id @default(uuid()) @db.Char(36)
+  name     String
+  email    String
+  password String
+  ldap     Boolean
+  isActive Boolean
+  deleted  Boolean
+  roleId   String?
+  unitId   String?
+
+  @@map("v_users_id")
+}
+
+view V_role_permissions {
+  id          String  @id @default(uuid()) @db.Char(36)
+  role        String
+  description String?
+  permissions String?
+
+  @@map("v_role_permissions")
+}
+
+view v_audits {
+  id                Int        @id @default(autoincrement())
+  userId            String?
+  userName          String?
+  userEmail         String?
+  username          String?
+  ipAddress         String?
+  action            EventType
+  details           String
+  endpoint          String
+  createdAt         DateTime
+  createdAtFormated String
+  source            SourceType
+
+  @@map("v_audits")
+}
+
+view v_tickets {
+  id                    String       @id @default(uuid())
+  reference             String
+  type                  String
+  comment               String?
+  unpaidCount           Int?         @default(0)
+  unpaidAmount          Float?       @default(0)
+  status                TicketStatus
+  workflowId            String?
+  workflowcurrentStepId String?
+  workflowStatus        String?
+
+  createdBy String
+  creator   String
+  createdAt DateTime
+
+  updatedBy String?
+  modifier  String?
+  updatedAt DateTime
+
+  // Indexes for query performance
+  @@index([workflowcurrentStepId], name: "idx_ticket_step")
+  @@index([status], name: "idx_ticket_status")
+  @@index([reference], name: "idx_ticket_reference")
+}
+
+view v_ticket_with_validator {
+  id                    String       @id @default(uuid())
+  reference             String
+  type                  String
+  comment               String?
+  unpaidCount           Int?         @default(0)
+  unpaidAmount          Float?       @default(0)
+  status                TicketStatus
+  workflowId            String?
+  workflowcurrentStepId String?
+  workflowStatus        String?
+
+  validatorUId    String?
+  validatorId     String?
+  validatorRoleId String?
+
+  createdBy String
+  creator   String
+  createdAt DateTime
+
+  updatedBy String?
+  modifier  String?
+  updatedAt DateTime
+
+  // Indexes for query performance
+  @@index([workflowcurrentStepId], name: "idx_ticket_step")
+  @@index([status], name: "idx_ticket_status")
+  @@index([reference], name: "idx_ticket_reference")
+  @@index([validatorUId], name: "idx_ticket_validatorUId")
+  @@index([validatorId], name: "idx_ticket_validatorId")
+  @@index([validatorRoleId], name: "idx_ticket_validatorRoleIdId")
+  @@index([validatorId, validatorRoleId], name: "idx_ticket_userRole")
+}
+
+view v_ticket {
+  id                    String       @id @default(uuid())
+  reference             String
+  type                  String
+  comment               String?
+  unpaidCount           Int?         @default(0)
+  unpaidAmount          Float?       @default(0)
+  status                TicketStatus
+  workflowId            String?
+  workflowcurrentStepId String?
+  workflowStatus        String?
+
+  SERVICE_NUMBER       Int
+  SUPPLY_POINT         Int?
+  CODE_CLIENT          Int?
+  NOM_CLIENT           String?
+  NO_COMPTEUR          String?
+  ADRESSE_CLIENT       String?
+  lIBELLE_TARIF_CLIENT String?
+  AGENCE               String?
+  REGION               String?
+  DIVISION             String?
+
+  validatorUId    String?
+  validatorId     String?
+  validatorRoleId String?
+
+  createdBy String
+  creator   String
+  createdAt DateTime
+
+  updatedBy String?
+  modifier  String?
+  updatedAt DateTime
+
+  // Indexes for query performance
+  @@index([workflowcurrentStepId], name: "idx_ticket_step")
+  @@index([status], name: "idx_ticket_status")
+  @@index([reference], name: "idx_ticket_reference")
+}
+
+view V_Assignments {
+  id               String               @id @default(uuid()) @db.Char(36)
+  status           v_assignments_status
+  reference        String
+  unitId           String               @db.Char(36)
+  unit             String?
+  userId           String               @db.Char(36)
+  user             String?
+  userEmail        String?
+  userPhone        String?
+  validatorId      String?              @db.Char(36)
+  validator        String?
+  validatedAt      DateTime?
+  validatorEmail   String?
+  validatorPhone   String?
+  reasonForRefusal String?
+  createdAt        DateTime             @default(now()) @map("createdAt")
+  createdBy        String               @db.Char(36)
+  updatedAt        DateTime             @map("updatedAt")
+  modifiedBy       String               @db.Char(36)
+
+  @@map("v_assignments")
+}
+
+view V_transactions_to_assign {
+  id          String   @id @default(uuid()) @db.Char(36)
+  reference   String?
+  name        String
+  amount      Float
+  bank        String?  @db.VarChar(255)
+  branch      String?
+  town        String?
+  paymentDate DateTime
+  paymentMode String?  @db.VarChar(255)
+  description String?  @db.VarChar(255)
+  status      String?  @db.VarChar(255)
+
+  @@map("v_transactions_to_assign")
+}
+
+view V_Transactions_available {
+  id                String    @id @default(uuid()) @db.Char(36)
+  reference         String?
+  name              String
+  amount            Float
+  bank              String?   @db.VarChar(255)
+  branchId          String    @db.Char(36)
+  branch            String?
+  town              String?
+  paymentDate       DateTime
+  paymentMode       String?   @db.VarChar(255)
+  description       String?   @db.VarChar(255)
+  statusId          Int       @default(1)
+  status            String?   @db.VarChar(255)
+  isReceiptReady    Boolean   @default(false)
+  validator         String?
+  validatedAt       DateTime?
+  assignator        String?
+  assignAt          DateTime?
+  verificator       String?
+  verifierAt        DateTime?
+  refusal           Boolean   @default(false)
+  adviceDuplication Boolean   @default(false)
+  reasonForRefusal  String?
+  userId            String?   @db.Char(36)
+  assignTo          String?
+  region            String?
+  unit              String?
+  createdBy         String?
+  creator           String?
+  createdAt         DateTime  @default(now())
+  modificator       String?
+  updatedAt         DateTime
+
+  @@map("v_transactions_available")
+}
+
+/// The underlying view does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+view v_transaction_integration_documents {
+  transactionId       String
+  reference           String
+  transaction_id      String
+  bill_account_number String
+  bill_number         String
+  billingDate         String
+  customerName        String
+  paid_amount         String
+  paid_date           String
+  advancePayment      Float  @default(0)
+
+  @@ignore
+}
+
+/// The underlying view does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+view v_transactions {
+  id                 String    @db.Char(36)
+  reference          String?
+  name               String
+  amount             Float
+  bankId             String    @db.Char(36)
+  bank               String?   @db.VarChar(255)
+  branchId           String    @db.Char(36)
+  branch             String?
+  town               String?
+  paymentDate        DateTime
+  paymentModeId      String    @db.Char(36)
+  paymentMode        String?   @db.VarChar(255)
+  description        String?   @db.VarChar(255)
+  statusId           Int       @default(1)
+  status             String?   @db.VarChar(255)
+  advice_duplication Boolean   @default(false)
+  validatorId        String?   @db.Char(36)
+  validator          String?
+  validatedAt        DateTime?
+  assignBy           String?   @db.Char(36)
+  assignator         String?
+  assignAt           DateTime?
+  verifierBy         String?   @db.Char(36)
+  verificator        String?
+  verifierAt         DateTime?
+  refusal            Boolean   @default(false)
+  reasonForRefusal   String?
+  userId             String?   @db.Char(36)
+  user               String?
+  regionId           String?   @db.Char(36)
+  region             String?
+  unitId             String?   @db.Char(36)
+  unit               String?
+  createdBy          String?
+  creator            String?
+  createdAt          DateTime  @default(now())
+  modificator        String?
+  updatedAt          DateTime
+
+  @@ignore
+}
+
+/// The underlying view does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+view v_transactions_eligible_for_unassignment {
+  id          String   @id @db.Char(36)
+  status      String?  @db.VarChar(255)
+  reference   String?
+  paymentDate DateTime
+  name        String
+  amount      Float
+  bank        String?  @db.VarChar(255)
+  branch      String?
+  paymentMode String?  @db.VarChar(255)
+  description String?  @db.VarChar(255)
+  region      String?
+  unit        String?
+  user        String?
+}
+
+/// The underlying view does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+view v_transactions_unicity {
+  id          String  @db.Char(36)
+  reference   String?
+  bank        String? @db.VarChar(255)
+  branch      String?
+  amount      Float
+  statusId    Int     @default(1)
+  paymentDate String? @db.VarChar(10)
+  delta       String? @db.VarChar(144)
+  email       String?
+  phone       String?
+
+  @@ignore
+}
+
+/// The underlying view does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+view v_transactions_unicity0 {
+  id        String  @db.Char(36)
+  reference String?
+  delta     String? @db.VarChar(336)
+  email     String?
+  phone     String?
+
+  @@ignore
+}
+
+/// The underlying view does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+
+view v_workflow {
+  id          String   @id
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime
+  createdBy   String
+  updatedAt   DateTime
+  updatedBy   String
+
+  @@map("v_workflows")
+}
+
+// =============================================
+// 9. ENUM DEFINITIONS
+// =============================================
+
+// Ticket lifecycle states
+enum TicketStatus {
+  DRAFT
+  NEW
+  PENDING_WORKFLOW_VALIDATION
+  APPROVED
+  REJECTED
+  IN_PROCESSING
+  COMPLETED
+  BLOCKED
+  CANCELLED
+}
+
+// Ensure the enum is correctly defined and matches the @default value
+
+// Validation types for workflow steps
+enum ValidationType {
+  ROLE // Requires specific role
+  USER // Specific user approval
+  AUTO // Automatic validation
+}
+
+// Multi-Factor Authentication methods
+enum MFAMethod {
+  TOTP
+  SMS
+  EMAIL
+  RECOVERY_CODE
+}
+
+enum EventAssignmentType {
+  ASSIGN
+  DISASSIGN
+}
+
+enum EventIntegrationType {
+  WAIT_GENERATION
+  GENERATED
+  PENDING
+  ONGOING
+  ONGOING_WITH_ISSUE
+  INTEGRATED
+  CANCELED
+}
+
+enum SourceType {
+  USER
+  SYSTEM
+}
+
+enum AssignmentStatusType {
+  PENDING
+  VALIDATE
+  REJECT
+}
+
+enum NotificationMethod {
+  EMAIL
+  SMS
+  WHATSAPP
+  INTERN
+  AVAILABLE
+}
+
+enum v_assignments_status {
+  PENDING
+  VALIDATE
+  REJECT
+}
+
+enum EventType {
+  LOGIN
+  LOGOUT
+  TRANSACTION
+  JOB
+}
+
+enum ApprovalPolicy {
+  ANY
+  ALL
+}
+
+enum ValidationActionType {
+  APPROVED
+  REJECTED
+}
+
+enum ConditionType {
+  EXPRESSION
+  JSON_SCHEMA
+}
+
+enum JobAction {
+  disconnect
+  reconnect
+  read
+}
+
+enum JobStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
